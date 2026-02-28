@@ -1,6 +1,5 @@
 import numpy as np
 from pathlib import Path
-
 BASE_DIR = Path("перемножение матриц разных размеров")
 SIZES = [200, 400, 800, 1200, 1600]
 
