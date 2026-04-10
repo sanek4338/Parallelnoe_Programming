@@ -5,202 +5,154 @@
 #include <string>
 #include <filesystem>
 #include <iomanip>
-#include <locale>
-#include <stdexcept>
 #include <omp.h>
 #include <windows.h>
 
 using namespace std;
 namespace fs = std::filesystem;
 
-static vector<vector<double>> loadMatrix(const fs::path& filePath, int& size) {
-    ifstream file(filePath);
+vector<vector<double>> readMatrix(const fs::path& filename, int& n) {
+    ifstream file(filename);
     if (!file) {
-        cerr << "Ошибка открытия файла: " << filePath.string() << "\n";
-        throw runtime_error("Не удалось открыть входной файл");
+        cerr << "Error opening file: " << filename.string() << "\n";
+        exit(1);
     }
 
-    file >> size;
-    if (!file || size <= 0) {
-        cerr << "Некорректный формат файла (не удалось прочитать N): " << filePath.string() << "\n";
-        throw runtime_error("Некорректный формат входного файла");
+    file >> n;
+    if (!file || n <= 0) {
+        cerr << "Bad matrix size in file: " << filename.string() << "\n";
+        exit(1);
     }
 
-    vector<vector<double>> matrix(size, vector<double>(size));
+    vector<vector<double>> m(n, vector<double>(n));
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++)
+            file >> m[i][j];
 
-    for (int row = 0; row < size; row++) {
-        for (int col = 0; col < size; col++) {
-            file >> matrix[row][col];
-            if (!file) {
-                cerr << "Некорректные данные матрицы в файле: " << filePath.string()
-                     << " (строка " << (row + 2) << ", столбец " << (col + 1) << ")\n";
-                throw runtime_error("Некорректные данные матрицы");
-            }
-        }
+    if (!file) {
+        cerr << "Bad matrix data in file: " << filename.string() << "\n";
+        exit(1);
     }
 
-    return matrix;
+    return m;
 }
 
-static void saveMatrix(const fs::path& filePath, const vector<vector<double>>& matrix) {
-    ofstream file(filePath);
+void writeMatrix(const fs::path& filename, const vector<vector<double>>& m) {
+    ofstream file(filename);
     if (!file) {
-        cerr << "Ошибка записи файла: " << filePath.string() << "\n";
-        throw runtime_error("Не удалось открыть файл для записи");
+        cerr << "Error writing file: " << filename.string() << "\n";
+        exit(1);
     }
 
-    int size = (int)matrix.size();
-    file << size << "\n";
-    for (int row = 0; row < size; row++) {
-        for (int col = 0; col < size; col++) {
-            file << matrix[row][col];
-            if (col + 1 < size) file << ' ';
+    int n = (int)m.size();
+    file << n << "\n";
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            file << m[i][j] << (j + 1 < n ? ' ' : '\n');
         }
-        file << "\n";
     }
 }
 
-static void setCoreAffinity(int cores) {
+vector<vector<double>> transpose(const vector<vector<double>>& m) {
+    int n = (int)m.size();
+    vector<vector<double>> t(n, vector<double>(n));
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            t[j][i] = m[i][j];
+    return t;
+}
+
+void setCoreAffinity(int cores) {
     DWORD_PTR mask = 0;
-
-    for (int i = 0; i < cores; i++) {
-        mask |= (1ULL << i);
-    }
+    for (int i = 0; i < cores; i++) mask |= (1ULL << i);
 
     if (!SetProcessAffinityMask(GetCurrentProcess(), mask)) {
-        cerr << "Предупреждение: не удалось установить affinity mask для " << cores << " ядер.\n";
+        cerr << "Warning: failed to set affinity for " << cores << " cores.\n";
     }
-}
-
-static vector<vector<double>> multiplyMatricesOpenMP(
-    const vector<vector<double>>& first,
-    const vector<vector<double>>& second,
-    int threads
-) {
-    int size = (int)first.size();
-    vector<vector<double>> result(size, vector<double>(size, 0.0));
-
-    omp_set_num_threads(threads);
-
-#pragma omp parallel for collapse(2)
-    for (int row = 0; row < size; row++) {
-        for (int col = 0; col < size; col++) {
-            double sum = 0.0;
-            for (int k = 0; k < size; k++) {
-                sum += first[row][k] * second[k][col];
-            }
-            result[row][col] = sum;
-        }
-    }
-
-    return result;
 }
 
 int main() {
-    setlocale(LC_ALL, ".UTF-8");
     SetConsoleCP(65001);
     SetConsoleOutputCP(65001);
 
     const fs::path BASE_FOLDER =
-        fs::path(PROJECT_DIR) / u8"перемножение матриц разных размеров";
+        fs::path(PROJECT_DIR) / u8"matrix";
 
-    const int matrixSizes[] = { 200, 400, 800, 1200, 1600, 2000 };
+    const int matrixSizes[] = { 200, 400, 800, 1200};
     const int threadCounts[] = { 1, 2, 4, 8 };
-    const int coreCounts[] = { 1, 2, 4, 8 };
+    const int coreCounts[] = { 1, 2, 4, 8};
 
-    cout << "Текущая рабочая папка: " << fs::current_path().string() << "\n";
-    cout << "Базовая папка с матрицами: " << BASE_FOLDER.string() << "\n";
-    cout << "Доступно логических процессоров: " << omp_get_num_procs() << "\n\n";
-
-    struct TestResult {
-        int size;
-        int threads;
-        int cores;
-        double seconds;
-        long long operations;
-    };
-
-    vector<TestResult> results;
+    cout << "Current working folder: " << fs::current_path().string() << "\n";
+    cout << "Base folder: " << BASE_FOLDER.string() << "\n";
+    cout << "Available logical processors: " << omp_get_num_procs() << "\n\n";
 
     for (int expectedSize : matrixSizes) {
-        try {
-            fs::path currentFolder = BASE_FOLDER / (to_string(expectedSize) + "x" + to_string(expectedSize));
-            fs::path firstMatrixFile = currentFolder / "matrixA.txt";
-            fs::path secondMatrixFile = currentFolder / "matrixB.txt";
+        fs::path currentFolder = BASE_FOLDER / (to_string(expectedSize) + "x" + to_string(expectedSize));
+        fs::path fileA = currentFolder / "matrixA.txt";
+        fs::path fileB = currentFolder / "matrixB.txt";
 
-            int size1 = 0, size2 = 0;
-            auto firstMatrix = loadMatrix(firstMatrixFile, size1);
-            auto secondMatrix = loadMatrix(secondMatrixFile, size2);
+        int n1 = 0, n2 = 0;
+        auto A = readMatrix(fileA, n1);
+        auto B = readMatrix(fileB, n2);
 
-            if (size1 != size2) {
-                cerr << "Ошибка: размеры матриц не совпадают в папке " << currentFolder.string()
-                     << " (первая: " << size1 << ", вторая: " << size2 << ")\n";
-                return 1;
-            }
-
-            if (size1 != expectedSize) {
-                cerr << "Предупреждение: в " << currentFolder.string()
-                     << " ожидается N=" << expectedSize << ", но в файле N=" << size1 << "\n";
-            }
-
-            for (int cores : coreCounts) {
-                if (cores > omp_get_num_procs()) {
-                    continue;
-                }
-
-                setCoreAffinity(cores);
-
-                for (int threads : threadCounts) {
-                    auto startTime = chrono::high_resolution_clock::now();
-                    auto resultMatrix = multiplyMatricesOpenMP(firstMatrix, secondMatrix, threads);
-                    auto endTime = chrono::high_resolution_clock::now();
-
-                    chrono::duration<double> elapsedTime = endTime - startTime;
-
-                    fs::path resultFile = currentFolder /
-                        ("result_" + to_string(size1) + "_t" + to_string(threads) + "_c" + to_string(cores) + ".txt");
-
-                    saveMatrix(resultFile, resultMatrix);
-
-                    long long totalOperations = 1LL * size1 * size1 * size1;
-                    results.push_back({ size1, threads, cores, elapsedTime.count(), totalOperations });
-
-                    cout << "OK: "
-                         << size1 << "x" << size1
-                         << " | потоков=" << threads
-                         << " | ядер=" << cores
-                         << " | операций=" << totalOperations
-                         << " | время=" << fixed << setprecision(6) << elapsedTime.count() << " сек"
-                         << " | сохранено: " << resultFile.string() << "\n";
-                }
-            }
-
-            cout << "\n";
-        }
-        catch (const exception& e) {
-            cerr << "\nСбой при обработке N=" << expectedSize << ": " << e.what() << "\n";
-            cerr << "Проверь, что файлы существуют по пути:\n"
-                 << "  " << (BASE_FOLDER / (to_string(expectedSize) + "x" + to_string(expectedSize)) / "matrixA.txt").string() << "\n"
-                 << "  " << (BASE_FOLDER / (to_string(expectedSize) + "x" + to_string(expectedSize)) / "matrixB.txt").string() << "\n";
+        if (n1 != n2) {
+            cerr << "Matrix sizes do not match in: " << currentFolder.string()
+                << " (A=" << n1 << ", B=" << n2 << ")\n";
             return 1;
         }
-    }
 
-    cout << "\n=== Итоговая таблица ===\n";
-    cout << left
-         << setw(10) << "Размер"
-         << setw(10) << "Потоки"
-         << setw(10) << "Ядра"
-         << setw(18) << "Операций(N^3)"
-         << "Время(сек)\n";
+        int n = n1;
+        if (n != expectedSize) {
+            cerr << "Warning: expected " << expectedSize << " but file has " << n << "\n";
+        }
 
-    for (const auto& result : results) {
-        cout << left
-             << setw(10) << result.size
-             << setw(10) << result.threads
-             << setw(10) << result.cores
-             << setw(18) << result.operations
-             << fixed << setprecision(6) << result.seconds << "\n";
+        // Чтобы умножение было быстрее и лучше масштабировалось:
+        // читаем B по строкам (для этого транспонируем один раз)
+        auto BT = transpose(B);
+
+        cout << "=== Matrix " << n << "x" << n << " (" << currentFolder.string() << ") ===\n";
+
+        for (int cores : coreCounts) {
+            if (cores > omp_get_num_procs()) continue;
+
+            setCoreAffinity(cores);
+
+            for (int threads : threadCounts) {
+                if (threads > cores) continue; // важно: не плодим потоков больше, чем разрешённых ядер
+
+                omp_set_dynamic(0);
+                omp_set_num_threads(threads);
+
+                vector<vector<double>> C(n, vector<double>(n, 0.0));
+
+                auto start = chrono::high_resolution_clock::now();
+
+#pragma omp parallel for schedule(static)
+                for (int i = 0; i < n; i++) {
+                    for (int j = 0; j < n; j++) {
+                        double sum = 0.0;
+                        for (int k = 0; k < n; k++) {
+                            sum += A[i][k] * BT[j][k]; // BT[j][k] вместо B[k][j]
+                        }
+                        C[i][j] = sum;
+                    }
+                }
+
+                auto end = chrono::high_resolution_clock::now();
+                chrono::duration<double> elapsed = end - start;
+
+                cout << "Threads: " << setw(2) << threads
+                    << " | Cores: " << setw(2) << cores
+                    << " | Time: " << fixed << setprecision(6) << elapsed.count() << " sec\n";
+
+                // Если нужно сохранять результаты как в исходном коде:
+                fs::path outFile = currentFolder /
+                    ("result_" + to_string(n) + "_t" + to_string(threads) + "_c" + to_string(cores) + ".txt");
+                writeMatrix(outFile, C);
+            }
+        }
+
+        cout << "\n";
     }
 
     return 0;
